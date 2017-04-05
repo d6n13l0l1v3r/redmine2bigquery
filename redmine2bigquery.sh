@@ -126,7 +126,8 @@ get_project_ids () {
 
 get_bq_maxid () {
 	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
-	${BQBCMD} --format csv query ${project} "SELECT id FROM redmine.issues ORDER BY id DESC LIMIT 1;" | tail -n 1
+	${BQBCMD} --format csv query ${project} --use_legacy_sql=false \
+		"SELECT 0 as id UNION ALL SELECT id FROM redmine.issues ORDER BY id DESC LIMIT 1;" | tail -n 1
 }
 
 fetch_issues () {
@@ -204,7 +205,7 @@ main () {
 	excludes=($(get_project_ids "${FLAGS_exclude_projects}" || echo '0'))
 	projects=(0 $(comm -23 <(printf '%s\n' "${includes[@]}" | sort) <(printf '%s\n' "${excludes[@]}" | sort)))
 	prjids=$( IFS=','; echo "${projects[*]}" )
-	lastid=0$(get_bq_maxid)
+	lastid=$(get_bq_maxid)
 
         echo "Exporting issues, starting at last id: ${lastid}"
 
