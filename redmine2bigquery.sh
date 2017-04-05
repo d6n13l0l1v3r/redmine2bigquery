@@ -26,7 +26,7 @@ SWD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : ${BQ:=bq}
 
 MYSQLBCMD="${MYSQL} -ss -N -B"
-BQBCMD="${BQ} -q"
+BQBCMD="${BQ} -q --headless"
 
 ## Command Line Options parsing..
 set +e
@@ -126,7 +126,7 @@ get_project_ids () {
 
 get_bq_maxid () {
 	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
-	${BQBCMD} query ${project} "SELECT id FROM redmine.issues ORDER BY id DESC LIMIT 1;"
+	${BQBCMD} --format csv query ${project} "SELECT id FROM redmine.issues ORDER BY id DESC LIMIT 1;" | tail -n 1
 }
 
 fetch_issues () {
@@ -175,6 +175,8 @@ fetch_issues () {
 			     "assigned_to, due_date, author, created_on) " \
 			     "VALUES "
 			count=$(($count+1))
+		else
+			echo -en ", "
 		fi
 		for i in {1..8}
 		do
@@ -185,13 +187,15 @@ fetch_issues () {
 				values[$i]="'${values[$i]}'"
 			fi
 		done
-		echo "($( IFS=','; echo "${values[*]}" ))"
+		echo "($( IFS=','; echo "${values[*]}" )) "
 	done
 	echo ";"
 }
 
 main () {
 	local -r dbname="${FLAGS_dbname}"
+	local -r dataset="${FLAGS_dataset}"
+	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
 	local -a includes=() excludes=() projects=()
 	local -i lastid
 	local prjids
@@ -202,21 +206,22 @@ main () {
 	prjids=$( IFS=','; echo "${projects[*]}" )
 	lastid=0$(get_bq_maxid)
 
-        echo "Dumping issues, starting at last id: ${lastid}"
+        echo "Exporting issues, starting at last id: ${lastid}"
 
 	declare_issue_changes_view
 
-	echo "INCLUDES => [${#includes[@]}] ${includes[@]}"
-	echo "EXCLUDES => [${#excludes[@]}] ${excludes[@]}"
-	echo "PROJECTS => [${#projects[@]}] ${projects[@]}"
+#	echo "INCLUDES => [${#includes[@]}] ${includes[@]}"
+#	echo "EXCLUDES => [${#excludes[@]}] ${excludes[@]}"
+#	echo "PROJECTS => [${#projects[@]}] ${projects[@]}"
 
 #	${MYSQLBCMD} "${dbname}" <<-_EOF
 #		SELECT identifier FROM projects WHERE id IN (${prjids});
 #	_EOF
 
-	fetch_issues ${lastid} "$(IFS=','; echo "${projects[*]}" )"
+	fetch_issues ${lastid} "$(IFS=','; echo "${projects[*]}" )" | \
+		${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
 
-	echo "Dumping.. finished!"
+	echo "finished!"
 
         exit 0
 }
