@@ -229,8 +229,12 @@ fetch_changes () {
 
 		SELECT c.id, c.issue_id,
 			IF(LENGTH(u.login) = 0, u.lastname, u.login) AS user,
-			BASE64_ENCODE(notes) AS notes,
-			property, prop_key, value, old_value, c.created_on
+			IF(LENGTH(notes) = 0, NULL, BASE64_ENCODE('**Text not imported**')) AS notes,
+			IF(LENGTH(property) = 0, NULL, property) AS property,
+			IF(LENGTH(prop_key) = 0, NULL, prop_key) AS prop_key, 
+			IF(LENGTH(value) = 0, NULL, value) AS value,
+			IF(LENGTH(old_value) = 0, NULL, old_value) AS old_value, 
+			c.created_on
 		FROM issue_changes AS c
 		LEFT JOIN users AS u ON (c.user_id = u.id)
 		WHERE c.id > @id AND c.created_on < @date
@@ -304,6 +308,10 @@ main () {
 
 	fetch_changes ${lastid} | \
 		${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
+
+	echo "done!"
+
+	# TODO: remove horfan changes.. (ie. those not referended by any issue)
 
 	echo "finished!"
 
