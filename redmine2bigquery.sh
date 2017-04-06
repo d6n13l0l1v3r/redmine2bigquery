@@ -231,13 +231,41 @@ fetch_changes () {
 			IF(LENGTH(u.login) = 0, u.lastname, u.login) AS user,
 			IF(LENGTH(notes) = 0, NULL, BASE64_ENCODE('**Text not imported**')) AS notes,
 			IF(LENGTH(property) = 0, NULL, property) AS property,
-			IF(LENGTH(prop_key) = 0, NULL, prop_key) AS prop_key, 
-			IF(((property = 'attr' AND prop_key IN ('subject', 'description')) OR property = 'attachment'),
-				BASE64_ENCODE('*Text not imported*'),
+			IF(LENGTH(prop_key) = 0, NULL, 
+				CASE prop_key
+				WHEN 'status_id' THEN 'status'
+				WHEN 'assigned_to_id' THEN 'assigned_to'
+				WHEN 'tracker_id' THEN 'tracker'
+				WHEN 'project_id' THEN 'project'
+				ELSE prop_key
+				END
+			) AS prop_key, 
+			IF(property = 'attr',
+				CASE prop_key
+				WHEN 'subject' THEN BASE64_ENCODE('*Subject not imported*')
+				WHEN 'description' THEN BASE64_ENCODE('*Description not imported*')
+				WHEN 'status_id' THEN BASE64_ENCODE((SELECT name FROM issue_statuses WHERE id = value))
+				WHEN 'assigned_to_id' THEN BASE64_ENCODE(
+					(SELECT IF(LENGTH(login) = 0, lastname, login) FROM users WHERE id = value)
+				)
+				WHEN 'tracker_id' THEN BASE64_ENCODE((SELECT name FROM trackers WHERE id = value))
+				WHEN 'project_id' THEN BASE64_ENCODE((SELECT name FROM projects WHERE id = value))
+				ELSE IF(LENGTH(value) = 0, NULL, BASE64_ENCODE(value))
+				END,
 				IF(LENGTH(value) = 0, NULL, BASE64_ENCODE(value))
 			) AS value,
-			IF(((property = 'attr' AND prop_key IN ('subject', 'description')) OR property = 'attachment'),
-				BASE64_ENCODE('*Text not imported*'),
+			IF(property = 'attr',
+				CASE prop_key
+				WHEN 'subject' THEN BASE64_ENCODE('*Subject not imported*')
+				WHEN 'description' THEN BASE64_ENCODE('*Description not imported*')
+				WHEN 'status_id' THEN BASE64_ENCODE((SELECT name FROM issue_statuses WHERE id = old_value))
+				WHEN 'assigned_to_id' THEN BASE64_ENCODE(
+					(SELECT IF(LENGTH(login) = 0, lastname, login) FROM users WHERE id = old_value)
+				)
+				WHEN 'tracker_id' THEN BASE64_ENCODE((SELECT name FROM trackers WHERE id = old_value))
+				WHEN 'project_id' THEN BASE64_ENCODE((SELECT name FROM projects WHERE id = old_value))
+				ELSE IF(LENGTH(old_value) = 0, NULL, BASE64_ENCODE(old_value))
+				END,
 				IF(LENGTH(old_value) = 0, NULL, BASE64_ENCODE(old_value))
 			) AS old_value,
 			c.created_on
@@ -283,41 +311,43 @@ main () {
 	local -r dataset="${FLAGS_dataset}"
 	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
 	local -a includes=() excludes=() projects=()
+	local -i max_issues=${FLAGS_max_issues}
+	local -i max_changes=${FLAGS_max_changes}
 	local -i lastid
 	local prjids
 
-	includes=($(get_project_ids "${FLAGS_include_projects}" || echo '0'))
-	excludes=($(get_project_ids "${FLAGS_exclude_projects}" || echo '0'))
-	projects=(0 $(comm -23 <(printf '%s\n' "${includes[@]}" | sort) <(printf '%s\n' "${excludes[@]}" | sort)))
-	prjids=$( IFS=','; echo "${projects[*]}" )
-	lastid=$(get_bq_issue_lastid)
 
 	declare_issue_changes_view
 
-        echo -en "Exporting issues, starting at last id: ${lastid}..."
+	if [ ${max_issues} -gt 0 ]
+	then \
+		includes=($(get_project_ids "${FLAGS_include_projects}" || echo '0'))
+		excludes=($(get_project_ids "${FLAGS_exclude_projects}" || echo '0'))
+		projects=(0 $(comm -23 <(printf '%s\n' "${includes[@]}" | sort) <(printf '%s\n' "${excludes[@]}" | sort)))
+		prjids=$( IFS=','; echo "${projects[*]}" )
+		lastid=$(get_bq_issue_lastid)
 
-#	echo "INCLUDES => [${#includes[@]}] ${includes[@]}"
-#	echo "EXCLUDES => [${#excludes[@]}] ${excludes[@]}"
-#	echo "PROJECTS => [${#projects[@]}] ${projects[@]}"
+	        echo -en "Exporting issues, starting at last id: ${lastid}..."
 
-#	${MYSQLBCMD} "${dbname}" <<-_EOF
-#		SELECT identifier FROM projects WHERE id IN (${prjids});
-#	_EOF
+		fetch_issues ${lastid} "$(IFS=','; echo "${projects[*]}" )" | \
+			${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
 
-	fetch_issues ${lastid} "$(IFS=','; echo "${projects[*]}" )" | \
-		${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
+		echo "done!"
+	fi
 
-	echo "done!"
+	if [ ${max_changes} -gt 0 ]
+	then \
+		lastid=$(get_bq_changes_lastid)
 
-	lastid=$(get_bq_changes_lastid)
-	echo -en "Exporting changes, starting at last id: ${lastid}..."
+		echo -en "Exporting changes, starting at last id: ${lastid}..."
 
-	fetch_changes ${lastid} | \
-		${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
+		fetch_changes ${lastid} | \
+			${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
 
-	echo "done!"
+		echo "done!"
+	fi
 
-	# TODO: remove horfan changes.. (ie. those not referended by any issue)
+	# TODO: remove orphan changes.. (ie. those not referended by any issue)
 
 	echo "finished!"
 
