@@ -4,13 +4,18 @@
 #
 # Before invoking this script, a functional bq dataset should have been
 # created as follows:
-#  - bq mk redmine
+#  - bq mk --data_location EU redmine
 #  - bq mk \
 #	--schema \
 #		id:integer,tracker:string,project:string,priority:string,status:string, \
 #		author:string,assigned_to:string,start_date:timestamp,due_date:timestamp, \
 #		estimated_hours:float,created_on:timestamp 
 #	-t redmine.issues
+#  - bq mk \
+#	--schema \
+#		id:integer,issue_id:integer,user:string,notes:string,property:string, \
+#		prop_key:string,value:string,old_value:string,created_on:timestamp \
+#	-t redmine.changes
 #
 
 set -o errexit -o noclobber -o nounset -o pipefail # Safe defaults..
@@ -25,7 +30,7 @@ SWD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : ${MYSQL:=mysql}
 : ${BQ:=bq}
 
-MYSQLBCMD="${MYSQL} -ss -N -B"
+MYSQLBCMD="${MYSQL} -ss -N -B --default-character-set=utf8 "
 BQBCMD="${BQ} -q --headless"
 
 ## Command Line Options parsing..
@@ -37,7 +42,8 @@ DEFINE_string	'username'		'redmine'	"server's username to auth with"        'u'
 DEFINE_string	'dbname'		'redmine'	"database name to dump from"            'd'
 DEFINE_string	'project'		''		"bigquery's project to use"		''
 DEFINE_string	'dataset'		''		"bigquery's dataset to use"		''
-DEFINE_integer	'max-issues'		100		"maximum number of issues to dump"	'm'
+DEFINE_integer	'max-issues'		100		"maximum number of issues to dump"	''
+DEFINE_integer	'max-changes'		300		"maximum number of changes to dump"	''
 DEFINE_string	'include-projects'	''		"projects to include in dump"		''
 DEFINE_string	'exclude-projects'	''		"projects to exclude from dump"		''
 set -e
@@ -124,16 +130,27 @@ get_project_ids () {
 	echo ${result//,/ }
 }
 
-get_bq_maxid () {
+get_bq_issue_lastid () {
+	local -r dataset="${FLAGS_dataset}"
 	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
+
 	${BQBCMD} --format csv query ${project} --use_legacy_sql=false \
-		"SELECT 0 as id UNION ALL SELECT id FROM redmine.issues ORDER BY id DESC LIMIT 1;" | tail -n 1
+		"SELECT 0 as id UNION ALL SELECT id FROM ${dataset}.issues ORDER BY id DESC LIMIT 1;" | tail -n 1
+}
+
+get_bq_changes_lastid () {
+	local -r dataset="${FLAGS_dataset}"
+	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
+
+	${BQBCMD} --format csv query ${project} --use_legacy_sql=false \
+		"SELECT 0 as id UNION ALL SELECT id FROM ${dataset}.changes ORDER BY id DESC LIMIT 1;" | tail -n 1
 }
 
 fetch_issues () {
 	local -i -r id=$1
 	local projects=$2
 	local -r dbname=${FLAGS_dbname}
+	local -r dataset="${FLAGS_dataset}"
 	local -i limit=${FLAGS_max_issues//'/\'}
 	local -r date=$(date +"%Y-%m-%d 00:00:00")
 	local -i count=0
@@ -144,7 +161,10 @@ fetch_issues () {
 	SET @id = ${id};
 	SET @date = '${date}';
 
-	SELECT v.id, t.name, p.name, e.name, s.name, u1.login, v.due_date, u2.login, v.created_on
+	SELECT v.id, t.name, p.name, e.name, s.name, 
+		IF(LENGTH(u1.login) = 0, u1.lastname, u1.login) AS assigned_to, v.due_date, 
+		IF(LENGTH(u2.login) = 0, u2.lastname, u2.login) AS author, 
+		v.created_on
 	FROM (
 		SELECT i.id, 
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'tracker_id' LIMIT 1), i.tracker_id)) AS tracker_id,
@@ -167,30 +187,85 @@ fetch_issues () {
 	LEFT JOIN users AS u2 ON (u2.id = v.author_id)
 	;
 	_EOF
-	while IFS=$'\t' read -r -a values
-	do
-		if [ $count -eq 0 ]
-		then \
-			echo "INSERT INTO redmine.issues (" \
-			     "id, tracker, project, priority, status, " \
-			     "assigned_to, due_date, author, created_on) " \
-			     "VALUES "
-			count=$(($count+1))
-		else
-			echo -en ", "
-		fi
-		for i in {1..8}
+	{
+		while IFS=$'\t' read -r -a values
 		do
-			if [ "$i" -eq 6 ];
+			if [ $count -eq 0 ]
 			then \
-				[ "${values[$i]}" != "NULL" ]&& values[$i]="'${values[$i]}'"
+				echo "INSERT INTO ${dataset}.issues (" \
+				     "id, tracker, project, priority, status, " \
+				     "assigned_to, due_date, author, created_on) " \
+				     "VALUES "
+				count=$(($count+1))
 			else
-				values[$i]="'${values[$i]}'"
+				echo -en ", "
 			fi
+			for i in {1..8}
+			do
+				if [ "$i" -eq 6 ];
+				then \
+					[ "${values[$i]}" != "NULL" ]&& values[$i]="'${values[$i]}'"
+				else
+					values[$i]="'${values[$i]}'"
+				fi
+			done
+			echo "($( IFS=','; echo "${values[*]}" )) "
 		done
-		echo "($( IFS=','; echo "${values[*]}" )) "
-	done
-	echo ";"
+		[ $count -eq 0 ]&& echo "SELECT NULL FROM ${dataset}.issues WHERE 1=0"
+	}
+}
+
+fetch_changes () {
+	local -i -r id=$1
+	local -r dbname=${FLAGS_dbname}
+	local -r dataset="${FLAGS_dataset}"
+	local -i limit=${FLAGS_max_changes//'/\'}
+	local -r date=$(date +"%Y-%m-%d 00:00:00")
+	local -i count=0
+
+	${MYSQLBCMD} "${dbname}" <<-_EOF |
+		SET @id = ${id};
+		SET @date = '${date}';
+
+		SELECT c.id, c.issue_id,
+			IF(LENGTH(u.login) = 0, u.lastname, u.login) AS user,
+			BASE64_ENCODE(notes) AS notes,
+			property, prop_key, value, old_value, c.created_on
+		FROM issue_changes AS c
+		LEFT JOIN users AS u ON (c.user_id = u.id)
+		WHERE c.id > @id AND c.created_on < @date
+		ORDER BY c.id ASC
+		LIMIT ${limit}
+	_EOF
+	{
+		while IFS=$'\t' read -r -a values
+		do
+			if [ $count -eq 0 ]
+			then \
+				echo "INSERT INTO ${dataset}.changes (" \
+				     "id, issue_id, user, notes, property, prop_key, " \
+				     "value, old_value, created_on) " \
+				     "VALUES "
+				count=$(($count+1))
+			else
+				echo -en ", "
+			fi
+			for i in {2..8}
+			do
+				if [ "$i" -eq 3 ];
+				then \
+					[ "${values[$i]}" != "NULL" ]&& values[$i]="CAST(FROM_BASE64('${values[$i]}') AS STRING)"
+				elif [ "$i" -ge 2 -o "$i" -le 7 ];
+				then \
+					[ "${values[$i]}" != "NULL" ]&& values[$i]="'${values[$i]}'"
+				else
+					values[$i]="'${values[$i]}'"
+				fi
+			done
+			echo "($( IFS=','; echo "${values[*]}" )) "
+		done
+		[ $count -eq 0 ]&& echo "SELECT NULL FROM ${dataset}.issues WHERE 1=0"
+	}
 }
 
 main () {
@@ -205,11 +280,11 @@ main () {
 	excludes=($(get_project_ids "${FLAGS_exclude_projects}" || echo '0'))
 	projects=(0 $(comm -23 <(printf '%s\n' "${includes[@]}" | sort) <(printf '%s\n' "${excludes[@]}" | sort)))
 	prjids=$( IFS=','; echo "${projects[*]}" )
-	lastid=$(get_bq_maxid)
-
-        echo "Exporting issues, starting at last id: ${lastid}"
+	lastid=$(get_bq_issue_lastid)
 
 	declare_issue_changes_view
+
+        echo -en "Exporting issues, starting at last id: ${lastid}..."
 
 #	echo "INCLUDES => [${#includes[@]}] ${includes[@]}"
 #	echo "EXCLUDES => [${#excludes[@]}] ${excludes[@]}"
@@ -220,6 +295,14 @@ main () {
 #	_EOF
 
 	fetch_issues ${lastid} "$(IFS=','; echo "${projects[*]}" )" | \
+		${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
+
+	echo "done!"
+
+	lastid=$(get_bq_changes_lastid)
+	echo -en "Exporting changes, starting at last id: ${lastid}..."
+
+	fetch_changes ${lastid} | \
 		${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
 
 	echo "finished!"
