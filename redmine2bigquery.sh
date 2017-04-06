@@ -211,7 +211,7 @@ fetch_issues () {
 			done
 			echo "($( IFS=','; echo "${values[*]}" )) "
 		done
-		[ $count -eq 0 ]&& echo "SELECT NULL FROM ${dataset}.issues WHERE 1=0"
+		[ $count -eq 0 ]&& echo "SELECT NULL FROM ${dataset}.issues WHERE 1=0" || :
 	}
 }
 
@@ -232,8 +232,14 @@ fetch_changes () {
 			IF(LENGTH(notes) = 0, NULL, BASE64_ENCODE('**Text not imported**')) AS notes,
 			IF(LENGTH(property) = 0, NULL, property) AS property,
 			IF(LENGTH(prop_key) = 0, NULL, prop_key) AS prop_key, 
-			IF(LENGTH(value) = 0, NULL, value) AS value,
-			IF(LENGTH(old_value) = 0, NULL, old_value) AS old_value, 
+			IF(((property = 'attr' AND prop_key IN ('subject', 'description')) OR property = 'attachment'),
+				BASE64_ENCODE('*Text not imported*'),
+				IF(LENGTH(value) = 0, NULL, BASE64_ENCODE(value))
+			) AS value,
+			IF(((property = 'attr' AND prop_key IN ('subject', 'description')) OR property = 'attachment'),
+				BASE64_ENCODE('*Text not imported*'),
+				IF(LENGTH(old_value) = 0, NULL, BASE64_ENCODE(old_value))
+			) AS old_value,
 			c.created_on
 		FROM issue_changes AS c
 		LEFT JOIN users AS u ON (c.user_id = u.id)
@@ -256,7 +262,7 @@ fetch_changes () {
 			fi
 			for i in {2..8}
 			do
-				if [ "$i" -eq 3 ];
+				if [ "$i" -eq 3 -o "$i" -eq 6 -o "$i" -eq 7 ];
 				then \
 					[ "${values[$i]}" != "NULL" ]&& values[$i]="CAST(FROM_BASE64('${values[$i]}') AS STRING)"
 				elif [ "$i" -ge 2 -o "$i" -le 7 ];
@@ -268,7 +274,7 @@ fetch_changes () {
 			done
 			echo "($( IFS=','; echo "${values[*]}" )) "
 		done
-		[ $count -eq 0 ]&& echo "SELECT NULL FROM ${dataset}.issues WHERE 1=0"
+		[ $count -eq 0 ]&& echo "SELECT NULL FROM ${dataset}.issues WHERE 1=0" || :
 	}
 }
 
