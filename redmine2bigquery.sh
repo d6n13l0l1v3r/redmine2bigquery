@@ -32,6 +32,7 @@ SWD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MYSQLBCMD="${MYSQL} -ss -N -B --default-character-set=utf8 "
 BQBCMD="${BQ} -q --headless"
+MAXCHANGES=300
 
 ## Command Line Options parsing..
 set +e
@@ -42,8 +43,8 @@ DEFINE_string	'username'		'redmine'	"server's username to auth with"        'u'
 DEFINE_string	'dbname'		'redmine'	"database name to dump from"            'd'
 DEFINE_string	'project'		''		"bigquery's project to use"		''
 DEFINE_string	'dataset'		''		"bigquery's dataset to use"		''
-DEFINE_integer	'max-issues'		100		"maximum number of issues to dump"	''
-DEFINE_integer	'max-changes'		300		"maximum number of changes to dump"	''
+DEFINE_integer	'max-issues'		150		"maximum number of issues to dump"	''
+DEFINE_integer	'max-changes'		900		"maximum number of changes to dump"	''
 DEFINE_integer	'max-days'		10		"maximum number of days to process"	''
 DEFINE_string	'include-projects'	''		"projects to include in dump"		''
 DEFINE_string	'exclude-projects'	''		"projects to exclude from dump"		''
@@ -153,10 +154,11 @@ get_bq_byday_startdate () {
 
 	${BQBCMD} --format csv query ${project} --use_legacy_sql=false <<-EOF |
 		SELECT FORMAT("%t", r.date) FROM (
-			(SELECT DATE_ADD(i1.date, INTERVAL 1 DAY) AS date FROM ${dataset}.issuesbyday AS i1 ORDER BY i1.date DESC LIMIT 1) 
-			UNION ALL 
-			(SELECT CAST(created_on AS DATE) AS date FROM ${dataset}.issues ORDER BY created_on ASC LIMIT 1)
-			) AS r
+		  (SELECT 1 AS idx, DATE_ADD(i1.date, INTERVAL 1 DAY) AS date FROM ${dataset}.issuesbyday AS i1 ORDER BY i1.date DESC LIMIT 1) 
+		  UNION ALL 
+		  (SELECT 2 AS idx, CAST(created_on AS DATE) AS date FROM ${dataset}.issues ORDER BY created_on ASC LIMIT 1)
+		  ) AS r
+		ORDER BY idx ASC
 		LIMIT 1;
 	EOF
        	tail -n 1
@@ -233,9 +235,9 @@ fetch_issues () {
 
 fetch_changes () {
 	local -i -r id=$1
+	local -i -r limit=${2//'/\'}
 	local -r dbname=${FLAGS_dbname}
 	local -r dataset="${FLAGS_dataset}"
-	local -i limit=${FLAGS_max_changes//'/\'}
 	local -r date=$(date +"%Y-%m-%d 00:00:00")
 	local -i count=0
 
@@ -403,7 +405,7 @@ update_byday_table ()
 }
 
 main () {
-	local prjids 
+	local prjids
 	local -r dbname="${FLAGS_dbname}"
 	local -r dataset="${FLAGS_dataset}"
 	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
@@ -433,14 +435,25 @@ main () {
 
 	if [ ${max_changes} -gt 0 ]
 	then \
-		lastid=$(get_bq_changes_lastid)
+		local -i max=${max_changes}
+		local -i limit=0
 
-		echo -en "Exporting changes, starting at last id: ${lastid}... "
+		#for ((i=0; i<=$[${max}/${MAXCHANGES}]; i++))
+		while : ;
+		do \
+			limit=$(( ${max} < ${MAXCHANGES} ? ${max} : ${MAXCHANGES} ))
+			max=$(( ${max}-${limit} ))
+			lastid=$(get_bq_changes_lastid)
 
-		fetch_changes ${lastid} | \
-			${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
+			echo -en "Exporting changes, starting at last id: ${lastid} (limit: ${limit})... "
 
-		echo "done!"
+			fetch_changes ${lastid} ${limit} | \
+				${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
+
+			echo "done!"
+
+			[ ${max} -le 0 ]&& break
+		done
 	fi
 
 	# TODO: remove orphan changes.. (ie. those not referended by any issue)
@@ -450,7 +463,8 @@ main () {
 		echo -en "Updating 'Issues By Day' table... "
 
 		create_bq_byday_table
-		update_byday_table $(get_bq_byday_startdate) >/dev/null
+		update_byday_table $(get_bq_byday_startdate) >/dev/null \
+			|| die $? "ERROR: BQ query failed! (error: $?)"
 
 		echo "done!"
 	fi
