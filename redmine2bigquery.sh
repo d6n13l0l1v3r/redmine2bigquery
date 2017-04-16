@@ -44,6 +44,7 @@ DEFINE_string	'project'		''		"bigquery's project to use"		''
 DEFINE_string	'dataset'		''		"bigquery's dataset to use"		''
 DEFINE_integer	'max-issues'		100		"maximum number of issues to dump"	''
 DEFINE_integer	'max-changes'		300		"maximum number of changes to dump"	''
+DEFINE_integer	'max-days'		10		"maximum number of days to process"	''
 DEFINE_string	'include-projects'	''		"projects to include in dump"		''
 DEFINE_string	'exclude-projects'	''		"projects to exclude from dump"		''
 set -e
@@ -144,6 +145,21 @@ get_bq_changes_lastid () {
 
 	${BQBCMD} --format csv query ${project} --use_legacy_sql=false \
 		"SELECT 0 as id UNION ALL SELECT id FROM ${dataset}.changes ORDER BY id DESC LIMIT 1;" | tail -n 1
+}
+
+get_bq_byday_startdate () {
+	local -r dataset="${FLAGS_dataset}"
+	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
+
+	${BQBCMD} --format csv query ${project} --use_legacy_sql=false <<-EOF |
+		SELECT FORMAT("%t", r.date) FROM (
+			(SELECT DATE_ADD(i1.date, INTERVAL 1 DAY) AS date FROM ${dataset}.issuesbyday AS i1 ORDER BY i1.date DESC LIMIT 1) 
+			UNION ALL 
+			(SELECT CAST(created_on AS DATE) AS date FROM ${dataset}.issues ORDER BY created_on ASC LIMIT 1)
+			) AS r
+		LIMIT 1;
+	EOF
+       	tail -n 1
 }
 
 fetch_issues () {
@@ -306,16 +322,96 @@ fetch_changes () {
 	}
 }
 
+create_bq_byday_table ()
+{
+	local -r dataset="${FLAGS_dataset}"
+	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
+	
+	${BQBCMD} ls ${project} ${dataset} |grep TABLE | \
+		grep -q -E '[[:space:]]+issuesbyday[[:space:]]+' \
+			&& return 0
+
+	echo "Creating (issues) by day table.."
+	${BQBCMD} mk --schema \
+		"$(cat <<-EOF
+			id:integer,date:date,
+			tracker:string,project:string,priority:string,status:string,assigned_to:string,
+			created_on:timestamp,updated_on:timestamp 
+		EOF)" \
+		-t ${dataset}.issuesbyday
+}
+
+update_byday_table ()
+{
+	local -r startdate=$1
+	local -r dataset="${FLAGS_dataset}"
+	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
+	local -i maxdays=${FLAGS_max_days}
+
+	${BQBCMD} query ${project} --format none \
+		--use_legacy_sql=false --allow_large_results \
+		--destination_table="${dataset}.issuesbyday" --append_table \
+		--parameter "startdate:DATE:${startdate}" \
+		--parameter "maxdays:INTEGER:${maxdays}" \
+	<<-EOF
+		SELECT DISTINCT
+		  r.date,
+		  r.id,
+		  r.created_on,
+		  (IFNULL(LAST_VALUE(cs.value) OVER (PARTITION BY cs.value ORDER BY cs.id ASC), r.status)) AS status,
+		  (IFNULL(LAST_VALUE(ca.value) OVER (PARTITION BY ca.value ORDER BY ca.id ASC), r.assigned_to)) AS assigned_to,
+		  (IFNULL(LAST_VALUE(ct.value) OVER (PARTITION BY ct.value ORDER BY ct.id ASC), r.tracker)) AS tracker,
+		  (IFNULL(LAST_VALUE(cp.value) OVER (PARTITION BY cp.value ORDER BY cp.id ASC), r.project)) AS project,
+		  (IFNULL(LAST_VALUE(ci.value) OVER (PARTITION BY ci.value ORDER BY ci.id ASC), r.priority)) AS priority,
+		  (GREATEST(
+		    IFNULL(cs.created_on, r.created_on),
+		    IFNULL(ca.created_on, r.created_on),
+		    IFNULL(ct.created_on, r.created_on),
+		    IFNULL(cp.created_on, r.created_on),
+		    IFNULL(ci.created_on, r.created_on),
+		    r.created_on)
+		  ) AS updated_on
+		FROM (
+		    SELECT cx.date, r1.*
+		    FROM ${dataset}.issues AS r1
+		    CROSS JOIN (
+		      SELECT * 
+		      FROM UNNEST(
+		        GENERATE_DATE_ARRAY(
+			  @startdate,
+			  LEAST(DATE_ADD(@startdate, INTERVAL @maxdays DAY), DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)),
+			  INTERVAL 1 DAY
+			)
+		      ) as date
+		    ) AS cx
+		    WHERE r1.created_on <= CAST(cx.date AS TIMESTAMP)
+		) AS r
+		LEFT OUTER JOIN ${dataset}.changes AS cs 
+		  ON (r.id = cs.issue_id AND cs.property = 'attr' AND cs.prop_key = 'status' AND cs.created_on <= CAST (r.date AS TIMESTAMP))
+		LEFT OUTER JOIN ${dataset}.changes AS ca
+		  ON (r.id = ca.issue_id AND ca.property = 'attr' AND ca.prop_key = 'assigned_to' AND ca.created_on <= CAST (r.date AS TIMESTAMP))
+		LEFT OUTER JOIN ${dataset}.changes AS ct
+		  ON (r.id = ct.issue_id AND ct.property = 'attr' AND ct.prop_key = 'tracker' AND ct.created_on <= CAST (r.date AS TIMESTAMP))
+		LEFT OUTER JOIN ${dataset}.changes AS cp
+		  ON (r.id = cp.issue_id AND cp.property = 'attr' AND cp.prop_key = 'project' AND cp.created_on <= CAST (r.date AS TIMESTAMP))
+		LEFT OUTER JOIN ${dataset}.changes AS ci
+		  ON (r.id = ci.issue_id AND ci.property = 'attr' AND ci.prop_key = 'priority' AND ci.created_on <= CAST (r.date AS TIMESTAMP))
+		
+		ORDER BY r.date, r.id DESC
+	EOF
+
+}
+
 main () {
+	local prjids 
 	local -r dbname="${FLAGS_dbname}"
 	local -r dataset="${FLAGS_dataset}"
 	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
 	local -a includes=() excludes=() projects=()
 	local -i max_issues=${FLAGS_max_issues}
 	local -i max_changes=${FLAGS_max_changes}
+	local -i max_days=${FLAGS_max_days}
 	local -i lastid
-	local prjids
-
 
 	declare_issue_changes_view
 
@@ -327,7 +423,7 @@ main () {
 		prjids=$( IFS=','; echo "${projects[*]}" )
 		lastid=$(get_bq_issue_lastid)
 
-	        echo -en "Exporting issues, starting at last id: ${lastid}..."
+	        echo -en "Exporting issues, starting at last id: ${lastid}... "
 
 		fetch_issues ${lastid} "$(IFS=','; echo "${projects[*]}" )" | \
 			${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
@@ -339,7 +435,7 @@ main () {
 	then \
 		lastid=$(get_bq_changes_lastid)
 
-		echo -en "Exporting changes, starting at last id: ${lastid}..."
+		echo -en "Exporting changes, starting at last id: ${lastid}... "
 
 		fetch_changes ${lastid} | \
 			${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
@@ -348,6 +444,16 @@ main () {
 	fi
 
 	# TODO: remove orphan changes.. (ie. those not referended by any issue)
+
+	if [ ${max_days} -gt 0 ]
+	then \
+		echo -en "Updating 'Issues By Day' table... "
+
+		create_bq_byday_table
+		update_byday_table $(get_bq_byday_startdate) >/dev/null
+
+		echo "done!"
+	fi
 
 	echo "finished!"
 
