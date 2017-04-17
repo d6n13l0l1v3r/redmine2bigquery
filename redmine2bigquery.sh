@@ -360,17 +360,17 @@ update_byday_table ()
 		  r.date,
 		  r.id,
 		  r.created_on,
-		  (IFNULL(LAST_VALUE(cs.value) OVER (PARTITION BY cs.value ORDER BY cs.id ASC), r.status)) AS status,
-		  (IFNULL(LAST_VALUE(ca.value) OVER (PARTITION BY ca.value ORDER BY ca.id ASC), r.assigned_to)) AS assigned_to,
-		  (IFNULL(LAST_VALUE(ct.value) OVER (PARTITION BY ct.value ORDER BY ct.id ASC), r.tracker)) AS tracker,
-		  (IFNULL(LAST_VALUE(cp.value) OVER (PARTITION BY cp.value ORDER BY cp.id ASC), r.project)) AS project,
-		  (IFNULL(LAST_VALUE(ci.value) OVER (PARTITION BY ci.value ORDER BY ci.id ASC), r.priority)) AS priority,
+		  (IFNULL(LAST_VALUE(cs.value) OVER ws, r.status)) AS status,
+		  (IFNULL(LAST_VALUE(ca.value) OVER wa, r.assigned_to)) AS assigned_to,
+		  (IFNULL(LAST_VALUE(ct.value) OVER wt, r.tracker)) AS tracker,
+		  (IFNULL(LAST_VALUE(cp.value) OVER wp, r.project)) AS project,
+		  (IFNULL(LAST_VALUE(ci.value) OVER wi, r.priority)) AS priority,
 		  (GREATEST(
-		    IFNULL(cs.created_on, r.created_on),
-		    IFNULL(ca.created_on, r.created_on),
-		    IFNULL(ct.created_on, r.created_on),
-		    IFNULL(cp.created_on, r.created_on),
-		    IFNULL(ci.created_on, r.created_on),
+		    IFNULL(LAST_VALUE(cs.created_on) OVER ws, r.created_on),
+		    IFNULL(LAST_VALUE(ca.created_on) OVER wa, r.created_on),
+		    IFNULL(LAST_VALUE(ct.created_on) OVER wt, r.created_on),
+		    IFNULL(LAST_VALUE(cp.created_on) OVER wp, r.created_on),
+		    IFNULL(LAST_VALUE(ci.created_on) OVER wi, r.created_on),
 		    r.created_on)
 		  ) AS updated_on
 		FROM (
@@ -398,6 +398,13 @@ update_byday_table ()
 		  ON (r.id = cp.issue_id AND cp.property = 'attr' AND cp.prop_key = 'project' AND cp.created_on <= CAST (r.date AS TIMESTAMP))
 		LEFT OUTER JOIN ${dataset}.changes AS ci
 		  ON (r.id = ci.issue_id AND ci.property = 'attr' AND ci.prop_key = 'priority' AND ci.created_on <= CAST (r.date AS TIMESTAMP))
+
+		WINDOW 
+		  ws AS (PARTITION BY cs.issue_id ORDER BY cs.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+		  wa AS (PARTITION BY ca.issue_id ORDER BY ca.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+		  wt AS (PARTITION BY ct.issue_id ORDER BY ct.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+		  wp AS (PARTITION BY cp.issue_id ORDER BY cp.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+		  wi AS (PARTITION BY ci.issue_id ORDER BY ci.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
 		
 		ORDER BY r.date, r.id DESC
 	EOF
