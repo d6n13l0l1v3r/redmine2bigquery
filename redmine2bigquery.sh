@@ -255,6 +255,7 @@ fetch_changes () {
 				WHEN 'assigned_to_id' THEN 'assigned_to'
 				WHEN 'tracker_id' THEN 'tracker'
 				WHEN 'project_id' THEN 'project'
+				WHEN 'priority_id' THEN 'priority'
 				ELSE prop_key
 				END
 			) AS prop_key, 
@@ -268,6 +269,7 @@ fetch_changes () {
 				)
 				WHEN 'tracker_id' THEN BASE64_ENCODE((SELECT name FROM trackers WHERE id = value))
 				WHEN 'project_id' THEN BASE64_ENCODE((SELECT name FROM projects WHERE id = value))
+				WHEN 'priority_id' THEN BASE64_ENCODE((SELECT name FROM enumerations WHERE type = 'IssuePriority' AND id = value))
 				ELSE IF(LENGTH(value) = 0, NULL, BASE64_ENCODE(value))
 				END,
 				IF(LENGTH(value) = 0, NULL, BASE64_ENCODE(value))
@@ -282,6 +284,7 @@ fetch_changes () {
 				)
 				WHEN 'tracker_id' THEN BASE64_ENCODE((SELECT name FROM trackers WHERE id = old_value))
 				WHEN 'project_id' THEN BASE64_ENCODE((SELECT name FROM projects WHERE id = old_value))
+				WHEN 'priority_id' THEN BASE64_ENCODE((SELECT name FROM enumerations WHERE type = 'IssuePriority' AND id = old_value))
 				ELSE IF(LENGTH(old_value) = 0, NULL, BASE64_ENCODE(old_value))
 				END,
 				IF(LENGTH(old_value) = 0, NULL, BASE64_ENCODE(old_value))
@@ -398,14 +401,12 @@ update_byday_table ()
 		  ON (r.id = cp.issue_id AND cp.property = 'attr' AND cp.prop_key = 'project' AND cp.created_on <= CAST (r.date AS TIMESTAMP))
 		LEFT OUTER JOIN ${dataset}.changes AS ci
 		  ON (r.id = ci.issue_id AND ci.property = 'attr' AND ci.prop_key = 'priority' AND ci.created_on <= CAST (r.date AS TIMESTAMP))
-
 		WINDOW 
 		  ws AS (PARTITION BY cs.issue_id ORDER BY cs.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
 		  wa AS (PARTITION BY ca.issue_id ORDER BY ca.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
 		  wt AS (PARTITION BY ct.issue_id ORDER BY ct.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
 		  wp AS (PARTITION BY cp.issue_id ORDER BY cp.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
 		  wi AS (PARTITION BY ci.issue_id ORDER BY ci.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
-		
 		ORDER BY r.date, r.id DESC
 	EOF
 
