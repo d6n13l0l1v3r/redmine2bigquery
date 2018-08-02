@@ -185,12 +185,12 @@ fetch_issues () {
 		v.created_on
 	FROM (
 		SELECT i.id, 
-			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'tracker_id' LIMIT 1), i.tracker_id)) AS tracker_id,
-			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'project_id' LIMIT 1), i.project_id)) AS project_id,
-			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'priority_id' LIMIT 1), i.priority_id)) AS priority_id,
-			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'status_id' LIMIT 1), i.status_id)) AS status_id,
-			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'assigned_to_id' LIMIT 1), i.assigned_to_id)) AS assigned_to_id,
-			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'due_date' LIMIT 1), i.due_date)) AS due_date,	
+			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'tracker_id' ORDER BY id ASC LIMIT 1), i.tracker_id)) AS tracker_id,
+			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'project_id' ORDER BY id ASC LIMIT 1), i.project_id)) AS project_id,
+			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'priority_id' ORDER BY id ASC LIMIT 1), i.priority_id)) AS priority_id,
+			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'status_id' ORDER BY id ASC LIMIT 1), i.status_id)) AS status_id,
+			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'assigned_to_id' ORDER BY id ASC LIMIT 1), i.assigned_to_id)) AS assigned_to_id,
+			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'due_date' ORDER BY id ASC LIMIT 1), i.due_date)) AS due_date,	
 			i.author_id, i.created_on
 		FROM issues AS i
 		WHERE i.id > @id AND i.created_on < @date AND i.project_id IN (${projects})
