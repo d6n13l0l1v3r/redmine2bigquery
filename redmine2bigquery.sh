@@ -489,10 +489,11 @@ main () {
 
 	if [ ${max_days} -gt 0 ]
 	then \
-		echo -en "Updating 'Issues By Day' table... "
+		local start=$(get_bq_byday_startdate)
+		echo -en "Updating 'Issues By Day' table... (start: ${start}) "
 
 		create_bq_byday_table
-		update_byday_table $(get_bq_byday_startdate) >/dev/null \
+		update_byday_table ${start} >/dev/null \
 			|| die $? "ERROR: BQ query failed! (error: $?)"
 
 		echo "done!"
