@@ -7,7 +7,7 @@
 #  - bq mk --data_location EU redmine
 #  - bq mk \
 #	--schema \
-#		id:integer,tracker:string,project:string,priority:string,status:string, \
+#		id:integer,tracker:string,project:string,priority:string,status:string,resolution:string, \
 #		author:string,assigned_to:string,start_date:timestamp,due_date:timestamp, \
 #		estimated_hours:float,created_on:timestamp 
 #	-t redmine.issues
@@ -132,6 +132,13 @@ get_project_ids () {
 	echo ${result//,/ }
 }
 
+get_resolution_prop_id () {
+	echo $(${MYSQLBCMD} "${dbname}" <<-_EOF
+		SELECT id FROM custom_fields WHERE type = 'IssueCustomField' AND name = 'Resolution';
+		_EOF
+	)
+}
+
 get_bq_issue_lastid () {
 	local -r dataset="${FLAGS_dataset}"
 	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
@@ -172,14 +179,16 @@ fetch_issues () {
 	local -i limit=${FLAGS_max_issues//'/\'}
 	local -r date=$(date +"%Y-%m-%d 00:00:00")
 	local -i count=0
+	local -r resid=$(get_resolution_prop_id)
 
 	[ -z "${projects}" -o "${projects}" = "0" ]&& projects="SELECT id FROM projects"
 
 	${MYSQLBCMD} "${dbname}" <<-_EOF |
 	SET @id = ${id};
 	SET @date = '${date}';
+	SET @resid = ${resid};
 
-	SELECT v.id, t.name, p.name, e.name, s.name, 
+	SELECT v.id, t.name, p.name, e.name, s.name, v.resolution,
 		IF(LENGTH(u1.login) = 0, u1.lastname, u1.login) AS assigned_to, v.due_date, 
 		IF(LENGTH(u2.login) = 0, u2.lastname, u2.login) AS author, 
 		v.created_on
@@ -190,7 +199,8 @@ fetch_issues () {
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'priority_id' ORDER BY id ASC LIMIT 1), i.priority_id)) AS priority_id,
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'status_id' ORDER BY id ASC LIMIT 1), i.status_id)) AS status_id,
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'assigned_to_id' ORDER BY id ASC LIMIT 1), i.assigned_to_id)) AS assigned_to_id,
-			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'due_date' ORDER BY id ASC LIMIT 1), i.due_date)) AS due_date,	
+			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'due_date' ORDER BY id ASC LIMIT 1), i.due_date)) AS due_date,
+			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = @resid ORDER BY id ASC LIMIT 1), NULL)) as resolution,
 			i.author_id, i.created_on
 		FROM issues AS i
 		WHERE i.id > @id AND i.created_on < @date AND i.project_id IN (${projects})
@@ -211,16 +221,16 @@ fetch_issues () {
 			if [ $count -eq 0 ]
 			then \
 				echo "INSERT INTO ${dataset}.issues (" \
-				     "id, tracker, project, priority, status, " \
+				     "id, tracker, project, priority, status, resolution, " \
 				     "assigned_to, due_date, author, created_on) " \
 				     "VALUES "
 				count=$(($count+1))
 			else
 				echo -en ", "
 			fi
-			for i in {1..8}
+			for i in {1..9}
 			do
-				if [ "$i" -eq 6 ];
+				if [ "$i" -eq 6 -o "$i" -eq 7 -o "$i" -eq 8 -o "$i" -eq 9 ];
 				then \
 					[ "${values[$i]}" != "NULL" ]&& values[$i]="'${values[$i]}'"
 				else
@@ -228,6 +238,7 @@ fetch_issues () {
 				fi
 			done
 			echo "($( IFS=','; echo "${values[*]}" )) "
+
 		done
 		[ $count -eq 0 ]&& echo "SELECT NULL FROM ${dataset}.issues WHERE 1=0" || :
 	}
@@ -239,11 +250,13 @@ fetch_changes () {
 	local -r dbname=${FLAGS_dbname}
 	local -r dataset="${FLAGS_dataset}"
 	local -r date=$(date +"%Y-%m-%d 00:00:00")
+	local -r resid=$(get_resolution_prop_id)
 	local -i count=0
 
 	${MYSQLBCMD} "${dbname}" <<-_EOF |
 		SET @id = ${id};
 		SET @date = '${date}';
+		SET @resid = '${resid}';
 
 		SELECT c.id, c.issue_id,
 			IF(LENGTH(u.login) = 0, u.lastname, u.login) AS user,
@@ -256,6 +269,7 @@ fetch_changes () {
 				WHEN 'tracker_id' THEN 'tracker'
 				WHEN 'project_id' THEN 'project'
 				WHEN 'priority_id' THEN 'priority'
+				WHEN @resid THEN 'resolution'
 				ELSE prop_key
 				END
 			) AS prop_key, 
@@ -273,6 +287,7 @@ fetch_changes () {
 				ELSE IF(LENGTH(value) = 0, NULL, BASE64_ENCODE(value))
 				END,
 				IF(LENGTH(value) = 0, NULL, BASE64_ENCODE(value))
+
 			) AS value,
 			IF(property = 'attr',
 				CASE prop_key
@@ -341,7 +356,7 @@ create_bq_byday_table ()
 		"$(cat <<-EOF
 			id:integer,date:date,
 			tracker:string,project:string,priority:string,status:string,assigned_to:string,
-			created_on:timestamp,updated_on:timestamp 
+			resolution:string,created_on:timestamp,updated_on:timestamp 
 		EOF)" \
 		-t ${dataset}.issuesbyday
 }
@@ -368,12 +383,14 @@ update_byday_table ()
 		  (IFNULL(LAST_VALUE(ct.value) OVER wt, r.tracker)) AS tracker,
 		  (IFNULL(LAST_VALUE(cp.value) OVER wp, r.project)) AS project,
 		  (IFNULL(LAST_VALUE(ci.value) OVER wi, r.priority)) AS priority,
+		  (IFNULL(LAST_VALUE(cr.value) OVER wr, r.resolution)) AS resolution,
 		  (GREATEST(
 		    IFNULL(LAST_VALUE(cs.created_on) OVER ws, r.created_on),
 		    IFNULL(LAST_VALUE(ca.created_on) OVER wa, r.created_on),
 		    IFNULL(LAST_VALUE(ct.created_on) OVER wt, r.created_on),
 		    IFNULL(LAST_VALUE(cp.created_on) OVER wp, r.created_on),
 		    IFNULL(LAST_VALUE(ci.created_on) OVER wi, r.created_on),
+		    IFNULL(LAST_VALUE(cr.created_on) OVER wr, r.created_on),
 		    r.created_on)
 		  ) AS updated_on
 		FROM (
@@ -401,12 +418,15 @@ update_byday_table ()
 		  ON (r.id = cp.issue_id AND cp.property = 'attr' AND cp.prop_key = 'project' AND cp.created_on <= CAST (r.date AS TIMESTAMP))
 		LEFT OUTER JOIN ${dataset}.changes AS ci
 		  ON (r.id = ci.issue_id AND ci.property = 'attr' AND ci.prop_key = 'priority' AND ci.created_on <= CAST (r.date AS TIMESTAMP))
+		LEFT OUTER JOIN ${dataset}.changes AS cr
+		  ON (r.id = cr.issue_id AND cr.property = 'cf' AND ci.prop_key = 'resolution' AND cr.created_on <= CAST (r.date AS TIMESTAMP))
 		WINDOW 
 		  ws AS (PARTITION BY cs.issue_id ORDER BY cs.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
 		  wa AS (PARTITION BY ca.issue_id ORDER BY ca.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
 		  wt AS (PARTITION BY ct.issue_id ORDER BY ct.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
 		  wp AS (PARTITION BY cp.issue_id ORDER BY cp.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
-		  wi AS (PARTITION BY ci.issue_id ORDER BY ci.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+		  wi AS (PARTITION BY ci.issue_id ORDER BY ci.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+		  wr AS (PARTITION BY cr.issue_id ORDER BY cr.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
 		ORDER BY r.date, r.id DESC
 	EOF
 
@@ -421,7 +441,7 @@ main () {
 	local -i max_issues=${FLAGS_max_issues}
 	local -i max_changes=${FLAGS_max_changes}
 	local -i max_days=${FLAGS_max_days}
-	local -i lastid
+	local -i lastid=0
 
 	declare_issue_changes_view
 
@@ -433,7 +453,7 @@ main () {
 		prjids=$( IFS=','; echo "${projects[*]}" )
 		lastid=$(get_bq_issue_lastid)
 
-	        echo -en "Exporting issues, starting at last id: ${lastid}... "
+		echo -en "Exporting issues, starting at last id: ${lastid}... "
 
 		fetch_issues ${lastid} "$(IFS=','; echo "${projects[*]}" )" | \
 			${BQBCMD} query ${project} --dataset_id="${dataset}" --nouse_legacy_sql
