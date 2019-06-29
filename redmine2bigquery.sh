@@ -186,7 +186,7 @@ fetch_issues () {
 	${MYSQLBCMD} "${dbname}" <<-_EOF |
 	SET @id = ${id};
 	SET @date = '${date}';
-	SET @resid = ${resid};
+	SET @resid = '${resid}';
 
 	SELECT v.id, t.name, p.name, e.name, s.name, v.resolution,
 		IF(LENGTH(u1.login) = 0, u1.lastname, u1.login) AS assigned_to, v.due_date, 
@@ -200,7 +200,7 @@ fetch_issues () {
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'status_id' ORDER BY id ASC LIMIT 1), i.status_id)) AS status_id,
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'assigned_to_id' ORDER BY id ASC LIMIT 1), i.assigned_to_id)) AS assigned_to_id,
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'due_date' ORDER BY id ASC LIMIT 1), i.due_date)) AS due_date,
-			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = @resid ORDER BY id ASC LIMIT 1), NULL)) as resolution,
+			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = @resid AND old_value <> '' ORDER BY id ASC LIMIT 1), NULL)) as resolution,
 			i.author_id, i.created_on
 		FROM issues AS i
 		WHERE i.id > @id AND i.created_on < @date AND i.project_id IN (${projects})
@@ -228,13 +228,14 @@ fetch_issues () {
 			else
 				echo -en ", "
 			fi
+			#echo "${values[@]} -- ${#values[@]}" >&2
 			for i in {1..9}
 			do
 				if [ "$i" -eq 6 -o "$i" -eq 7 -o "$i" -eq 8 -o "$i" -eq 9 ];
 				then \
-					[ "${values[$i]}" != "NULL" ]&& values[$i]="'${values[$i]}'"
+					[ "${values[$i]}" != "NULL" ]&& values[$i]="'${values[$i]//\'/\'}'"
 				else
-					values[$i]="'${values[$i]}'"
+					values[$i]="'${values[$i]//\'/\'}'"
 				fi
 			done
 			echo "($( IFS=','; echo "${values[*]}" )) "
