@@ -420,7 +420,7 @@ update_byday_table ()
 		LEFT OUTER JOIN ${dataset}.changes AS ci
 		  ON (r.id = ci.issue_id AND ci.property = 'attr' AND ci.prop_key = 'priority' AND ci.created_on <= CAST (r.date AS TIMESTAMP))
 		LEFT OUTER JOIN ${dataset}.changes AS cr
-		  ON (r.id = cr.issue_id AND cr.property = 'cf' AND ci.prop_key = 'resolution' AND cr.created_on <= CAST (r.date AS TIMESTAMP))
+		  ON (r.id = cr.issue_id AND cr.property = 'cf' AND cr.prop_key = 'resolution' AND cr.created_on <= CAST (r.date AS TIMESTAMP))
 		WINDOW 
 		  ws AS (PARTITION BY cs.issue_id ORDER BY cs.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
 		  wa AS (PARTITION BY ca.issue_id ORDER BY ca.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
