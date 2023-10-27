@@ -7,9 +7,9 @@
 #  - bq mk --data_location EU redmine
 #  - bq mk \
 #	--schema \
-#		id:integer,tracker:string,project:string,priority:string,status:string,resolution:string, \
+#		id:integer,tracker:string,project:string,priority:string,category:string,status:string,resolution:string, \
 #		author:string,assigned_to:string,start_date:timestamp,due_date:timestamp, \
-#		estimated_hours:float,created_on:timestamp 
+#		estimated_hours:float,created_on:timestamp
 #	-t redmine.issues
 #  - bq mk \
 #	--schema \
@@ -90,14 +90,14 @@ declare_issue_changes_view () {
 
 	${MYSQLBCMD} "${dbname}" <<-_EOF
 		-- Create issue_changes VIEW
-		CREATE OR REPLACE 
+		CREATE OR REPLACE
 		-- ALGORITHM = TEMPTABLE
 		VIEW issue_changes AS
 			SELECT j.id, j.journalized_id AS issue_id, j.created_on, j.user_id, j.notes, jd.property, jd.prop_key, jd.value, jd.old_value
 			FROM journals AS j
 			LEFT JOIN journal_details AS jd ON (j.id = jd.journal_id)
 			WHERE j.journalized_type = 'Issue'
-			ORDER BY j.created_on ASC;	
+			ORDER BY j.created_on ASC;
 	_EOF
 }
 
@@ -120,7 +120,7 @@ get_project_ids () {
 	do \
 		local ids="${result}"
 		tmp=$(${MYSQLBCMD} "${dbname}" <<-_EOF
-			SELECT GROUP_CONCAT(DISTINCT id ORDER BY id ASC SEPARATOR ',') 
+			SELECT GROUP_CONCAT(DISTINCT id ORDER BY id ASC SEPARATOR ',')
 		        FROM projects WHERE parent_id IN (${ids}) OR id IN (${ids});
 			_EOF
 		)
@@ -161,8 +161,8 @@ get_bq_byday_startdate () {
 
 	${BQBCMD} --format csv query ${project} --use_legacy_sql=false <<-EOF |
 		SELECT FORMAT("%t", r.date) FROM (
-		  (SELECT 1 AS idx, DATE_ADD(i1.date, INTERVAL 1 DAY) AS date FROM ${dataset}.issuesbyday AS i1 ORDER BY i1.date DESC LIMIT 1) 
-		  UNION ALL 
+		  (SELECT 1 AS idx, DATE_ADD(i1.date, INTERVAL 1 DAY) AS date FROM ${dataset}.issuesbyday AS i1 ORDER BY i1.date DESC LIMIT 1)
+		  UNION ALL
 		  (SELECT 2 AS idx, CAST(created_on AS DATE) AS date FROM ${dataset}.issues ORDER BY created_on ASC LIMIT 1)
 		  ) AS r
 		ORDER BY idx ASC
@@ -188,15 +188,16 @@ fetch_issues () {
 	SET @date = '${date}';
 	SET @resid = '${resid}';
 
-	SELECT v.id, t.name, p.name, e.name, s.name, v.resolution,
-		IF(LENGTH(u1.login) = 0, u1.lastname, u1.login) AS assigned_to, v.due_date, 
-		IF(LENGTH(u2.login) = 0, u2.lastname, u2.login) AS author, 
+	SELECT v.id, t.name, p.name, e.name, c.name, s.name, v.resolution,
+		IF(LENGTH(u1.login) = 0, u1.lastname, u1.login) AS assigned_to, v.due_date,
+		IF(LENGTH(u2.login) = 0, u2.lastname, u2.login) AS author,
 		v.created_on
 	FROM (
-		SELECT i.id, 
+		SELECT i.id,
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'tracker_id' ORDER BY id ASC LIMIT 1), i.tracker_id)) AS tracker_id,
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'project_id' ORDER BY id ASC LIMIT 1), i.project_id)) AS project_id,
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'priority_id' ORDER BY id ASC LIMIT 1), i.priority_id)) AS priority_id,
+			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'category_id' ORDER BY id ASC LIMIT 1), i.category_id)) AS category_id,
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'status_id' ORDER BY id ASC LIMIT 1), i.status_id)) AS status_id,
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'assigned_to_id' ORDER BY id ASC LIMIT 1), i.assigned_to_id)) AS assigned_to_id,
 			(COALESCE((SELECT old_value FROM issue_changes WHERE issue_id = i.id AND prop_key = 'due_date' ORDER BY id ASC LIMIT 1), i.due_date)) AS due_date,
@@ -210,6 +211,7 @@ fetch_issues () {
 	LEFT JOIN trackers AS t ON (t.id = v.tracker_id)
 	LEFT JOIN projects AS p ON (p.id = v.project_id)
 	LEFT JOIN enumerations AS e ON (e.id = v.priority_id)
+	LEFT JOIN issue_categories AS c ON (c.id = v.category_id)
 	LEFT JOIN issue_statuses AS s ON (s.id = v.status_id)
 	LEFT JOIN users AS u1 ON (u1.id = v.assigned_to_id)
 	LEFT JOIN users AS u2 ON (u2.id = v.author_id)
@@ -220,8 +222,9 @@ fetch_issues () {
 		do
 			if [ $count -eq 0 ]
 			then \
+				#TODO Need to confirm if we planing to use same table or change to v2
 				echo "INSERT INTO ${dataset}.issues (" \
-				     "id, tracker, project, priority, status, resolution, " \
+				     "id, tracker, project, priority, category, status, resolution, " \
 				     "assigned_to, due_date, author, created_on) " \
 				     "VALUES "
 				count=$(($count+1))
@@ -263,8 +266,9 @@ fetch_changes () {
 			IF(LENGTH(u.login) = 0, u.lastname, u.login) AS user,
 			IF(LENGTH(notes) = 0, NULL, BASE64_ENCODE('**Text not imported**')) AS notes,
 			IF(LENGTH(property) = 0, NULL, property) AS property,
-			IF(LENGTH(prop_key) = 0, NULL, 
+			IF(LENGTH(prop_key) = 0, NULL,
 				CASE prop_key
+				WHEN 'category_id' THEN 'category'
 				WHEN 'status_id' THEN 'status'
 				WHEN 'assigned_to_id' THEN 'assigned_to'
 				WHEN 'tracker_id' THEN 'tracker'
@@ -273,11 +277,12 @@ fetch_changes () {
 				WHEN @resid THEN 'resolution'
 				ELSE prop_key
 				END
-			) AS prop_key, 
+			) AS prop_key,
 			IF(property = 'attr',
 				CASE prop_key
 				WHEN 'subject' THEN BASE64_ENCODE('*Subject not imported*')
 				WHEN 'description' THEN BASE64_ENCODE('*Description not imported*')
+				WHEN 'category_id' THEN BASE64_ENCODE((SELECT name FROM issue_categories WHERE id = value))
 				WHEN 'status_id' THEN BASE64_ENCODE((SELECT name FROM issue_statuses WHERE id = value))
 				WHEN 'assigned_to_id' THEN BASE64_ENCODE(
 					(SELECT IF(LENGTH(login) = 0, lastname, login) FROM users WHERE id = value)
@@ -294,6 +299,7 @@ fetch_changes () {
 				CASE prop_key
 				WHEN 'subject' THEN BASE64_ENCODE('*Subject not imported*')
 				WHEN 'description' THEN BASE64_ENCODE('*Description not imported*')
+				WHEN 'category_id' THEN BASE64_ENCODE((SELECT name FROM issue_categories WHERE id = old_value))
 				WHEN 'status_id' THEN BASE64_ENCODE((SELECT name FROM issue_statuses WHERE id = old_value))
 				WHEN 'assigned_to_id' THEN BASE64_ENCODE(
 					(SELECT IF(LENGTH(login) = 0, lastname, login) FROM users WHERE id = old_value)
@@ -343,24 +349,26 @@ fetch_changes () {
 	}
 }
 
+#TODO Need to confirm if we planing to use same table or change to v2
 create_bq_byday_table ()
 {
 	local -r dataset="${FLAGS_dataset}"
 	local -r project=${FLAGS_project:+--project_id ${FLAGS_project}}
-	
+
 	${BQBCMD} ls ${project} ${dataset} |grep TABLE | \
 		grep -q -E '[[:space:]]+issuesbyday[[:space:]]+' \
 			&& return 0
-
 	echo "Creating (issues) by day table.."
 	${BQBCMD} mk --schema \
 		"$(cat <<-EOF
 			id:integer,date:date,
-			tracker:string,project:string,priority:string,status:string,assigned_to:string,
-			resolution:string,created_on:timestamp,updated_on:timestamp 
+			tracker:string,project:string,category:string,priority:string,status:string,assigned_to:string,
+			resolution:string,created_on:timestamp,updated_on:timestamp
 		EOF)" \
 		-t ${dataset}.issuesbyday
 }
+
+#TODO Need to confirm if we planing to use same destination_table or change to v2
 
 update_byday_table ()
 {
@@ -375,60 +383,91 @@ update_byday_table ()
 		--parameter "startdate:DATE:${startdate}" \
 		--parameter "maxdays:INTEGER:${maxdays}" \
 	<<-EOF
-		SELECT DISTINCT
-		  r.date,
-		  r.id,
-		  r.created_on,
-		  (IFNULL(LAST_VALUE(cs.value) OVER ws, r.status)) AS status,
-		  (IFNULL(LAST_VALUE(ca.value) OVER wa, r.assigned_to)) AS assigned_to,
-		  (IFNULL(LAST_VALUE(ct.value) OVER wt, r.tracker)) AS tracker,
-		  (IFNULL(LAST_VALUE(cp.value) OVER wp, r.project)) AS project,
-		  (IFNULL(LAST_VALUE(ci.value) OVER wi, r.priority)) AS priority,
-		  (IFNULL(LAST_VALUE(cr.value) OVER wr, r.resolution)) AS resolution,
-		  (GREATEST(
-		    IFNULL(LAST_VALUE(cs.created_on) OVER ws, r.created_on),
-		    IFNULL(LAST_VALUE(ca.created_on) OVER wa, r.created_on),
-		    IFNULL(LAST_VALUE(ct.created_on) OVER wt, r.created_on),
-		    IFNULL(LAST_VALUE(cp.created_on) OVER wp, r.created_on),
-		    IFNULL(LAST_VALUE(ci.created_on) OVER wi, r.created_on),
-		    IFNULL(LAST_VALUE(cr.created_on) OVER wr, r.created_on),
-		    r.created_on)
-		  ) AS updated_on
-		FROM (
-		    SELECT cx.date, r1.*
-		    FROM ${dataset}.issues AS r1
-		    CROSS JOIN (
-		      SELECT * 
-		      FROM UNNEST(
-		        GENERATE_DATE_ARRAY(
-			  @startdate,
-			  LEAST(DATE_ADD(@startdate, INTERVAL @maxdays DAY), DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)),
-			  INTERVAL 1 DAY
-			)
-		      ) as date
-		    ) AS cx
-		    WHERE r1.created_on <= CAST(cx.date AS TIMESTAMP)
+		WITH Changes AS (
+			SELECT
+				issue_id,
+				MAX(CASE WHEN property = 'attr' AND prop_key = 'status' THEN value END) AS status,
+				MAX(CASE WHEN property = 'attr' AND prop_key = 'assigned_to' THEN value END) AS assigned_to,
+				MAX(CASE WHEN property = 'attr' AND prop_key = 'tracker' THEN value END) AS tracker,
+				MAX(CASE WHEN property = 'attr' AND prop_key = 'project' THEN value END) AS project,
+				MAX(CASE WHEN property = 'attr' AND prop_key = 'category' THEN value END) AS category,
+				MAX(CASE WHEN property = 'attr' AND prop_key = 'priority' THEN value END) AS priority,
+				MAX(CASE WHEN property = 'cf' AND prop_key = 'resolution' THEN value END) AS resolution,
+				MAX(created_on) AS last_change_date
+			FROM
+				${dataset}.changes
+			WHERE
+				(property = 'attr' AND prop_key IN ('status', 'assigned_to', 'tracker', 'project', 'category', 'priority'))
+				OR (property = 'cf' AND prop_key = 'resolution')
+			GROUP BY
+				issue_id
+		)
+		SELECT
+		r.date,
+		r.id,
+		r.created_on,
+		(IFNULL(LAST_VALUE(c.status) OVER ws, r.status)) AS status,
+		(IFNULL(LAST_VALUE(c.assigned_to) OVER wa, r.assigned_to)) AS assigned_to,
+		(IFNULL(LAST_VALUE(c.tracker) OVER wt, r.tracker)) AS tracker,
+		(IFNULL(LAST_VALUE(c.project) OVER wp, r.project)) AS project,
+		(IFNULL(LAST_VALUE(c.category) OVER wc, r.category)) AS category,
+		(IFNULL(LAST_VALUE(c.priority) OVER wpr, r.priority)) AS priority,
+		(IFNULL(LAST_VALUE(c.resolution) OVER wres, r.resolution)) AS resolution,
+		(GREATEST(
+			COALESCE(MAX(c.last_change_date) OVER ws, r.created_on),
+			COALESCE(MAX(c.last_change_date) OVER wa, r.created_on),
+			COALESCE(MAX(c.last_change_date) OVER wt, r.created_on),
+			COALESCE(MAX(c.last_change_date) OVER wp, r.created_on),
+			COALESCE(MAX(c.last_change_date) OVER wc, r.created_on),
+			COALESCE(MAX(c.last_change_date) OVER wpr, r.created_on),
+			COALESCE(MAX(c.last_change_date) OVER wres, r.created_on),
+			r.created_on
+		)) AS updated_on
+		FROM
+		(
+			SELECT
+			cx.date,
+			r1.id,
+			r1.created_on,
+			r1.status,
+			r1.assigned_to,
+			r1.tracker,
+			r1.project,
+			r1.category,
+			r1.priority,
+			r1.resolution
+			FROM
+			${dataset}.issues AS r1
+			CROSS JOIN (
+				SELECT
+					*
+				FROM
+					UNNEST(
+						GENERATE_DATE_ARRAY(
+							@startdate,
+							LEAST(DATE_ADD(@startdate, INTERVAL @maxdays DAY), DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)),
+							INTERVAL 1 DAY
+						)
+					) AS date
+			) AS cx
+			WHERE
+			r1.created_on <= CAST(cx.date AS TIMESTAMP)
 		) AS r
-		LEFT OUTER JOIN ${dataset}.changes AS cs 
-		  ON (r.id = cs.issue_id AND cs.property = 'attr' AND cs.prop_key = 'status' AND cs.created_on <= CAST (r.date AS TIMESTAMP))
-		LEFT OUTER JOIN ${dataset}.changes AS ca
-		  ON (r.id = ca.issue_id AND ca.property = 'attr' AND ca.prop_key = 'assigned_to' AND ca.created_on <= CAST (r.date AS TIMESTAMP))
-		LEFT OUTER JOIN ${dataset}.changes AS ct
-		  ON (r.id = ct.issue_id AND ct.property = 'attr' AND ct.prop_key = 'tracker' AND ct.created_on <= CAST (r.date AS TIMESTAMP))
-		LEFT OUTER JOIN ${dataset}.changes AS cp
-		  ON (r.id = cp.issue_id AND cp.property = 'attr' AND cp.prop_key = 'project' AND cp.created_on <= CAST (r.date AS TIMESTAMP))
-		LEFT OUTER JOIN ${dataset}.changes AS ci
-		  ON (r.id = ci.issue_id AND ci.property = 'attr' AND ci.prop_key = 'priority' AND ci.created_on <= CAST (r.date AS TIMESTAMP))
-		LEFT OUTER JOIN ${dataset}.changes AS cr
-		  ON (r.id = cr.issue_id AND cr.property = 'cf' AND cr.prop_key = 'resolution' AND cr.created_on <= CAST (r.date AS TIMESTAMP))
-		WINDOW 
-		  ws AS (PARTITION BY cs.issue_id ORDER BY cs.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
-		  wa AS (PARTITION BY ca.issue_id ORDER BY ca.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
-		  wt AS (PARTITION BY ct.issue_id ORDER BY ct.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
-		  wp AS (PARTITION BY cp.issue_id ORDER BY cp.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
-		  wi AS (PARTITION BY ci.issue_id ORDER BY ci.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
-		  wr AS (PARTITION BY cr.issue_id ORDER BY cr.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
-		ORDER BY r.date, r.id DESC
+		LEFT OUTER JOIN
+		Changes AS c
+		ON
+		r.id = c.issue_id
+		WINDOW
+		ws AS (PARTITION BY c.issue_id ORDER BY c.last_change_date ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+		wa AS (PARTITION BY c.issue_id ORDER BY c.last_change_date ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+		wt AS (PARTITION BY c.issue_id ORDER BY c.last_change_date ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+		wp AS (PARTITION BY c.issue_id ORDER BY c.last_change_date ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+		wc AS (PARTITION BY c.issue_id ORDER BY c.last_change_date ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+		wpr AS (PARTITION BY c.issue_id ORDER BY c.last_change_date ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+		wres AS (PARTITION BY c.issue_id ORDER BY c.last_change_date ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+		ORDER BY
+		r.date,
+		r.id DESC;
 	EOF
 
 }
